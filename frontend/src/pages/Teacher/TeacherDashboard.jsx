@@ -22,6 +22,7 @@ import {
 import { buildTeacherSections, formatDate, formatDateTime, getTeacherSectionKey, safeText } from './teacherSections'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api'
+const API_HOST = import.meta.env.VITE_API_BASE || API_URL.replace(/\/api\/?$/, '')
 
 const StatCard = ({ icon: Icon, label, value, tone, trend }) => (
   <div className={`${tone.bg} rounded-2xl p-5 border ${tone.border} shadow-sm`}>
@@ -76,6 +77,39 @@ const SummaryCard = ({ label, value, helper, icon: Icon, tone = 'slate' }) => {
 const FieldWrapper = ({ field, value, onChange, options = [] }) => {
   const className = 'w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100'
 
+  if (field.type === 'checkbox-group') {
+    const selectedValues = Array.isArray(value) ? value.map(String) : []
+
+    const toggleValue = (optionValue) => {
+      const normalizedValue = String(optionValue)
+      const nextValues = selectedValues.includes(normalizedValue)
+        ? selectedValues.filter((item) => item !== normalizedValue)
+        : [...selectedValues, normalizedValue]
+
+      onChange(nextValues)
+    }
+
+    return (
+      <div className="grid grid-cols-1 gap-3 rounded-xl border border-slate-200 bg-white p-4 sm:grid-cols-2">
+        {options.map((option) => {
+          const checked = selectedValues.includes(String(option.value))
+
+          return (
+            <label key={String(option.value)} className={`flex cursor-pointer items-center gap-3 rounded-lg border px-3 py-2 text-sm transition ${checked ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}>
+              <input
+                type="checkbox"
+                checked={checked}
+                onChange={() => toggleValue(option.value)}
+                className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+              />
+              <span className="font-medium">{option.label}</span>
+            </label>
+          )
+        })}
+      </div>
+    )
+  }
+
   if (field.type === 'textarea') {
     return <textarea className={`${className} min-h-[110px]`} value={value || ''} onChange={onChange} placeholder={field.placeholder || ''} />
   }
@@ -110,6 +144,8 @@ const TeacherDashboard = () => {
   const [bulkLoading, setBulkLoading] = useState(false)
   const [bulkSaving, setBulkSaving] = useState(false)
   const [bulkMessage, setBulkMessage] = useState('')
+  const [bulkSearchQuery, setBulkSearchQuery] = useState('')
+  const [submissionsModal, setSubmissionsModal] = useState({ open: false, assignmentId: null, submissions: [], drafts: {}, readerUrl: '' })
 
   const sections = useMemo(() => buildTeacherSections(lookups), [lookups])
   const section = sections[sectionKey] || sections.dashboard
@@ -198,18 +234,22 @@ const TeacherDashboard = () => {
       setBulkStudents([])
       return
     }
-
-    const loadClassAttendanceStudents = async () => {
+    const loadClassAttendanceStudents = async (classId = bulkClassId) => {
       setBulkLoading(true)
       setBulkMessage('')
       try {
-        const response = await axios.get(`${API_URL}/teacher/attendance/class/${bulkClassId}/students`)
+        const response = await axios.get(`${API_URL}/teacher/attendance/class/${classId}/students`)
         const students = (response.data.students || []).map((student) => ({
           ...student,
-          status: 'present',
+          status: 'absent',
           remarks: ''
         }))
-        setBulkStudents(students)
+
+        // dedupe by id to avoid duplicate rows
+        const map = {}
+        for (const s of students) map[String(s.id)] = s
+        const unique = Object.values(map)
+        setBulkStudents(unique)
       } catch (loadError) {
         setError(loadError.response?.data?.message || 'Failed to load class attendance sheet')
       } finally {
@@ -239,9 +279,7 @@ const TeacherDashboard = () => {
   }
 
   const handleFieldChange = (field, event) => {
-    const value = field.type === 'select'
-      ? event.target.value
-      : event.target.value
+    const value = event?.target ? event.target.value : event
 
     setForm((current) => ({ ...current, [field.name]: value }))
   }
@@ -267,6 +305,54 @@ const TeacherDashboard = () => {
     }
   }
 
+  const updateSubmissionDraft = (studentId, field, value) => {
+    setSubmissionsModal((current) => ({
+      ...current,
+      drafts: {
+        ...(current.drafts || {}),
+        [String(studentId)]: {
+          ...(current.drafts?.[String(studentId)] || {}),
+          [field]: value
+        }
+      }
+    }))
+  }
+
+  const handleMarkSubmission = async (submission) => {
+    try {
+      const draft = submissionsModal.drafts?.[String(submission.studentId)] || {}
+      await axios.put(`${API_URL}/teacher/assignments/${submissionsModal.assignmentId}/grade`, {
+        studentId: submission.studentId,
+        marksObtained: draft.marksObtained,
+        feedback: draft.feedback
+      })
+
+      const res = await axios.get(`${API_URL}/teacher/assignments/${submissionsModal.assignmentId}/submissions`)
+      const submissions = (res.data.submissions || []).map((s) => ({
+        ...s,
+        fileUrl: s.submittedFile ? `${API_HOST}${s.submittedFile}` : ''
+      }))
+
+      const drafts = submissions.reduce((accumulator, item) => {
+        accumulator[String(item.studentId)] = {
+          marksObtained: item.marksObtained ?? '',
+          feedback: item.feedback || ''
+        }
+        return accumulator
+      }, {})
+
+      setSubmissionsModal((current) => ({
+        ...current,
+        submissions,
+        drafts
+      }))
+
+      await refreshCurrentSection()
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to save submission mark')
+    }
+  }
+
   const handleSubmit = async (event) => {
     event.preventDefault()
     setSaving(true)
@@ -276,7 +362,17 @@ const TeacherDashboard = () => {
       const payload = { ...form }
 
       if (section.key === 'routine' && payload.periods) {
-        payload.periods = JSON.parse(payload.periods)
+        try {
+          const parsed = JSON.parse(payload.periods)
+          if (!Array.isArray(parsed)) {
+            setError('Periods JSON must be a JSON array (example: [{"periodNumber":1,"startTime":"09:00","endTime":"09:40","subject":"..."}]).')
+            return
+          }
+          payload.periods = parsed
+        } catch (parseError) {
+          setError(`Periods JSON is invalid: ${parseError.message}`)
+          return
+        }
       }
 
       const url = editingId ? `${API_URL}/teacher/${section.endpoint}/${editingId}` : `${API_URL}/teacher/${section.endpoint}`
@@ -304,6 +400,42 @@ const TeacherDashboard = () => {
         ? { ...item, [field]: value }
         : item
     )))
+  }
+
+  const attendanceSheetStats = useMemo(() => {
+    const normalizeStatus = (value) => {
+      const status = String(value || '').trim().toLowerCase()
+      if (['present', 'absent', 'late', 'leave'].includes(status)) return status
+      return 'absent'
+    }
+
+    return bulkStudents.reduce((accumulator, student) => {
+      const status = normalizeStatus(student.status)
+      accumulator.total += 1
+      accumulator[status] += 1
+      return accumulator
+    }, { total: 0, present: 0, absent: 0, leave: 0, late: 0 })
+  }, [bulkStudents])
+
+  const visibleBulkStudents = useMemo(() => {
+    const query = bulkSearchQuery.trim().toLowerCase()
+    if (!query) return bulkStudents
+
+    return bulkStudents.filter((student) => {
+      const name = String(student.name || '').toLowerCase()
+      const roll = String(student.rollNumber || '').toLowerCase()
+      return name.includes(query) || roll.includes(query)
+    })
+  }, [bulkStudents, bulkSearchQuery])
+
+  const statusTone = (status) => {
+    switch (status) {
+      case 'present': return 'border-emerald-300 bg-emerald-50 text-emerald-700'
+      case 'absent': return 'border-rose-300 bg-rose-50 text-rose-700'
+      case 'leave': return 'border-blue-300 bg-blue-50 text-blue-700'
+      case 'late': return 'border-amber-300 bg-amber-50 text-amber-700'
+      default: return 'border-slate-300 bg-slate-50 text-slate-700'
+    }
   }
 
   const handleBulkAttendanceSubmit = async () => {
@@ -353,6 +485,15 @@ const TeacherDashboard = () => {
       }))
 
       setBulkMessage(`Attendance saved for ${response.data.updatedCount || records.length} students`)
+      // Refresh class student list to reflect any class membership changes
+      await axios.get(`${API_URL}/teacher/attendance/class/${bulkClassId}/students`)
+        .then((res) => {
+          const students = (res.data.students || []).map((student) => ({ ...student, status: 'absent', remarks: '' }))
+          const map = {}
+          for (const s of students) map[String(s.id)] = s
+          setBulkStudents(Object.values(map))
+        })
+        .catch(() => {})
       await refreshCurrentSection()
     } catch (bulkError) {
       setError(bulkError.response?.data?.message || 'Failed to submit class attendance')
@@ -376,13 +517,36 @@ const TeacherDashboard = () => {
         <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
           <div>
             <h3 className="text-lg font-bold text-slate-900">Whole Class Attendance</h3>
-            <p className="text-sm text-slate-500 mt-1">Mark attendance for all students and auto-update attendance percentages.</p>
+            <p className="text-sm text-slate-500 mt-1">Spreadsheet-style attendance sheet for quick class marking.</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <button type="button" onClick={() => setAllBulkStatus('present')} className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-100">All Present</button>
             <button type="button" onClick={() => setAllBulkStatus('absent')} className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 hover:bg-rose-100">All Absent</button>
             <button type="button" onClick={() => setAllBulkStatus('late')} className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700 hover:bg-amber-100">All Late</button>
             <button type="button" onClick={() => setAllBulkStatus('leave')} className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-100">All Leave</button>
+          </div>
+        </div>
+
+        <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-5">
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Total</p>
+            <p className="mt-2 text-2xl font-bold text-slate-900">{attendanceSheetStats.total}</p>
+          </div>
+          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+            <p className="text-xs font-semibold uppercase tracking-wide text-emerald-600">Present</p>
+            <p className="mt-2 text-2xl font-bold text-emerald-700">{attendanceSheetStats.present}</p>
+          </div>
+          <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4">
+            <p className="text-xs font-semibold uppercase tracking-wide text-rose-600">Absent</p>
+            <p className="mt-2 text-2xl font-bold text-rose-700">{attendanceSheetStats.absent || 0}</p>
+          </div>
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+            <p className="text-xs font-semibold uppercase tracking-wide text-amber-600">Late</p>
+            <p className="mt-2 text-2xl font-bold text-amber-700">{attendanceSheetStats.late || 0}</p>
+          </div>
+          <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
+            <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">Leave</p>
+            <p className="mt-2 text-2xl font-bold text-blue-700">{attendanceSheetStats.leave || 0}</p>
           </div>
         </div>
 
@@ -426,58 +590,108 @@ const TeacherDashboard = () => {
           </div>
         </div>
 
+        <div className="mb-5">
+          <label className="block text-sm font-medium text-slate-700 mb-2">Search students</label>
+          <input
+            type="text"
+            className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+            value={bulkSearchQuery}
+            onChange={(event) => setBulkSearchQuery(event.target.value)}
+            placeholder="Search by student name or roll number"
+          />
+        </div>
+
         {bulkMessage && <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-700">{bulkMessage}</div>}
 
         {bulkLoading ? (
           <div className="py-8 text-center text-sm text-slate-500">Loading class students...</div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-slate-200 text-sm">
-              <thead className="bg-slate-50">
-                <tr>
-                  <th className="px-4 py-3 text-left font-semibold text-slate-600">Student</th>
-                  <th className="px-4 py-3 text-left font-semibold text-slate-600">Roll No</th>
-                  <th className="px-4 py-3 text-left font-semibold text-slate-600">Status</th>
-                  <th className="px-4 py-3 text-left font-semibold text-slate-600">Remarks</th>
-                  <th className="px-4 py-3 text-left font-semibold text-slate-600">Attendance %</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 bg-white">
-                {bulkStudents.map((student) => (
-                  <tr key={student.id}>
-                    <td className="px-4 py-3 text-slate-700">{student.name}</td>
-                    <td className="px-4 py-3 text-slate-700">{student.rollNumber || '—'}</td>
-                    <td className="px-4 py-3">
-                      <select
-                        className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                        value={student.status || 'present'}
-                        onChange={(event) => updateBulkStudent(student.id, 'status', event.target.value)}
-                      >
-                        <option value="present">Present</option>
-                        <option value="absent">Absent</option>
-                        <option value="leave">Leave</option>
-                        <option value="late">Late</option>
-                      </select>
-                    </td>
-                    <td className="px-4 py-3">
-                      <input
-                        type="text"
-                        className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                        value={student.remarks || ''}
-                        onChange={(event) => updateBulkStudent(student.id, 'remarks', event.target.value)}
-                        placeholder="Optional"
-                      />
-                    </td>
-                    <td className="px-4 py-3 text-slate-700">{student.attendanceSummary?.attendancePercentage || 0}%</td>
-                  </tr>
-                ))}
-                {!bulkStudents.length && (
+          <div className="overflow-hidden rounded-2xl border border-slate-200">
+            <div className="overflow-x-auto">
+              <table className="min-w-full border-separate border-spacing-0 text-sm">
+                <thead className="sticky top-0 z-10 bg-slate-900 text-white">
                   <tr>
-                    <td colSpan={5} className="px-4 py-6 text-center text-sm text-slate-500">No students found in this class. Add students with class assignment from the Admin Students section.</td>
+                    <th className="whitespace-nowrap px-4 py-3 text-left font-semibold">#</th>
+                    <th className="whitespace-nowrap px-4 py-3 text-left font-semibold">Student</th>
+                    <th className="whitespace-nowrap px-4 py-3 text-left font-semibold">Roll</th>
+                    <th className="whitespace-nowrap px-4 py-3 text-left font-semibold">Present</th>
+                    <th className="whitespace-nowrap px-4 py-3 text-left font-semibold">Absent</th>
+                    <th className="whitespace-nowrap px-4 py-3 text-left font-semibold">Late</th>
+                    <th className="whitespace-nowrap px-4 py-3 text-left font-semibold">Leave</th>
+                    <th className="whitespace-nowrap px-4 py-3 text-left font-semibold">Remarks</th>
+                    <th className="whitespace-nowrap px-4 py-3 text-left font-semibold">Status</th>
                   </tr>
-                )}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="bg-white">
+                  {visibleBulkStudents.map((student, index) => {
+                    const currentStatus = student.status || 'present'
+
+                    return (
+                      <tr key={student.id} className={`border-b border-slate-100 ${index % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'}`}>
+                        <td className="whitespace-nowrap px-4 py-3 font-semibold text-slate-500">{index + 1}</td>
+                        <td className="whitespace-nowrap px-4 py-3 font-semibold text-slate-900">{student.name}</td>
+                        <td className="whitespace-nowrap px-4 py-3 text-slate-600">{student.rollNumber || '—'}</td>
+                        <td className="px-4 py-3">
+                          <button
+                            type="button"
+                            onClick={() => updateBulkStudent(student.id, 'status', 'present')}
+                            className={`inline-flex w-full items-center justify-center rounded-lg border px-3 py-2 font-semibold transition ${currentStatus === 'present' ? 'border-emerald-500 bg-emerald-600 text-white' : 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'}`}
+                          >
+                            Present
+                          </button>
+                        </td>
+                        <td className="px-4 py-3">
+                          <button
+                            type="button"
+                            onClick={() => updateBulkStudent(student.id, 'status', 'absent')}
+                            className={`inline-flex w-full items-center justify-center rounded-lg border px-3 py-2 font-semibold transition ${currentStatus === 'absent' ? 'border-rose-500 bg-rose-600 text-white' : 'border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100'}`}
+                          >
+                            Absent
+                          </button>
+                        </td>
+                        <td className="px-4 py-3">
+                          <button
+                            type="button"
+                            onClick={() => updateBulkStudent(student.id, 'status', 'late')}
+                            className={`inline-flex w-full items-center justify-center rounded-lg border px-3 py-2 font-semibold transition ${currentStatus === 'late' ? 'border-amber-500 bg-amber-600 text-white' : 'border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100'}`}
+                          >
+                            Late
+                          </button>
+                        </td>
+                        <td className="px-4 py-3">
+                          <button
+                            type="button"
+                            onClick={() => updateBulkStudent(student.id, 'status', 'leave')}
+                            className={`inline-flex w-full items-center justify-center rounded-lg border px-3 py-2 font-semibold transition ${currentStatus === 'leave' ? 'border-blue-500 bg-blue-600 text-white' : 'border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100'}`}
+                          >
+                            Leave
+                          </button>
+                        </td>
+                        <td className="px-4 py-3 min-w-[220px]">
+                          <input
+                            type="text"
+                            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                            value={student.remarks || ''}
+                            onChange={(event) => updateBulkStudent(student.id, 'remarks', event.target.value)}
+                            placeholder="Optional remarks"
+                          />
+                        </td>
+                        <td className="whitespace-nowrap px-4 py-3">
+                          <span className={`inline-flex rounded-full border px-3 py-1 text-xs font-semibold capitalize ${statusTone(currentStatus)}`}>
+                            {currentStatus}
+                          </span>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                  {!visibleBulkStudents.length && (
+                    <tr>
+                      <td colSpan={9} className="px-4 py-8 text-center text-sm text-slate-500">No students match your search.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
       </div>
@@ -486,74 +700,21 @@ const TeacherDashboard = () => {
 
   const renderSectionDashboard = () => {
     const stats = dashboardData?.stats || {}
-    const schedule = dashboardData?.schedule || []
-    const recentActivities = dashboardData?.recentActivities || []
 
     return (
-      <div className="space-y-8">
+      <div className="space-y-6">
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-          <StatCard icon={BookOpen} label="Assigned Classes" value={stats.assignedClasses || 0} tone={{ bg: 'bg-blue-50', border: 'border-blue-100', text: 'text-blue-600', iconBg: 'bg-blue-600' }} trend={0} />
-          <StatCard icon={Users} label="Total Students" value={stats.totalStudents || 0} tone={{ bg: 'bg-emerald-50', border: 'border-emerald-100', text: 'text-emerald-600', iconBg: 'bg-emerald-600' }} trend={0} />
-          <StatCard icon={ClipboardList} label="Pending Assignments" value={stats.pendingAssignments || 0} tone={{ bg: 'bg-amber-50', border: 'border-amber-100', text: 'text-amber-600', iconBg: 'bg-amber-600' }} trend={0} />
-          <StatCard icon={Calendar} label="Today's Classes" value={stats.todayClasses || 0} tone={{ bg: 'bg-rose-50', border: 'border-rose-100', text: 'text-rose-600', iconBg: 'bg-rose-600' }} trend={0} />
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <SummaryCard label="Attendance Rate" value={`${stats.attendanceRate || 0}%`} helper="Average across assigned classes" icon={CheckCircle2} tone="emerald" />
-          <SummaryCard label="Status" value="Live" helper="MongoDB connected data view" icon={Activity} tone="blue" />
-        </div>
-
-        <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-          <div className="xl:col-span-2 rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-            <h3 className="text-lg font-bold text-slate-900 mb-4 flex items-center gap-2">
-              <Calendar size={20} className="text-blue-600" />
-              Today's Schedule
-            </h3>
-            <div className="space-y-3">
-              {schedule.length ? schedule.map((session, index) => (
-                <div key={`${session.className}-${index}`} className="flex flex-col gap-3 rounded-2xl border border-slate-100 p-4 md:flex-row md:items-center md:justify-between">
-                  <div className="flex items-center gap-4">
-                    <div className="w-20 text-sm font-semibold text-blue-600">{session.startTime || 'TBD'}</div>
-                    <div>
-                      <p className="font-semibold text-slate-900">{session.subject}</p>
-                      <p className="text-sm text-slate-500">Class {session.className} • {session.room}</p>
-                    </div>
-                  </div>
-                  <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">Period {session.periodNumber || 'N/A'}</span>
-                </div>
-              )) : <div className="text-sm text-slate-500">No schedule available.</div>}
-            </div>
-          </div>
-
-          <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-            <h3 className="text-lg font-bold text-slate-900 mb-4">Quick Summary</h3>
-            <div className="space-y-3">
-              <div className="rounded-2xl bg-slate-50 p-4">
-                <p className="text-sm text-slate-500">Attendance</p>
-                <p className="text-2xl font-bold text-slate-900 mt-1">{stats.attendanceRate || 0}%</p>
-              </div>
-              <div className="rounded-2xl bg-blue-50 p-4">
-                <p className="text-sm text-slate-500">Assigned Classes</p>
-                <p className="text-2xl font-bold text-blue-700 mt-1">{stats.assignedClasses || 0}</p>
-              </div>
-              <div className="rounded-2xl bg-emerald-50 p-4">
-                <p className="text-sm text-slate-500">Total Students</p>
-                <p className="text-2xl font-bold text-emerald-700 mt-1">{stats.totalStudents || 0}</p>
-              </div>
-            </div>
-          </div>
+          <StatCard icon={BookOpen} label="Assigned Classes" value={stats.assignedClasses || 0} tone={{ bg: 'bg-blue-50', border: 'border-blue-100', text: 'text-blue-600', iconBg: 'bg-blue-600' }} />
+          <StatCard icon={Users} label="Total Students" value={stats.totalStudents || 0} tone={{ bg: 'bg-emerald-50', border: 'border-emerald-100', text: 'text-emerald-600', iconBg: 'bg-emerald-600' }} />
+          <StatCard icon={ClipboardList} label="Attendance Rate" value={`${stats.attendanceRate || 0}%`} tone={{ bg: 'bg-amber-50', border: 'border-amber-100', text: 'text-amber-600', iconBg: 'bg-amber-600' }} />
+          <StatCard icon={Calendar} label="Realtime" value="Live" tone={{ bg: 'bg-rose-50', border: 'border-rose-100', text: 'text-rose-600', iconBg: 'bg-rose-600' }} />
         </div>
 
         <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-          <h3 className="text-lg font-bold text-slate-900 mb-4">Recent Activities</h3>
-          <div className="space-y-3">
-            {recentActivities.length ? recentActivities.map((activity, index) => (
-              <div key={`${activity.title}-${index}`} className="flex items-center gap-3 rounded-2xl border border-slate-100 px-4 py-3">
-                <div className="h-2 w-2 rounded-full bg-emerald-500" />
-                <p className="text-sm text-slate-700">{activity.title} - {activity.description}</p>
-                <p className="ml-auto text-xs text-slate-400">{formatDateTime(activity.timestamp)}</p>
-              </div>
-            )) : <div className="text-sm text-slate-500">No recent activity.</div>}
+          <h3 className="text-lg font-bold text-slate-900 mb-4">Live Status</h3>
+          <div className="flex flex-wrap gap-4">
+            <SummaryCard label="Attendance Rate" value={`${stats.attendanceRate || 0}%`} helper="Average across assigned classes" icon={CheckCircle2} tone="emerald" />
+            <SummaryCard label="Realtime" value="Connected" helper="Updates from admin/teacher" icon={Activity} tone="blue" />
           </div>
         </div>
       </div>
@@ -590,6 +751,54 @@ const TeacherDashboard = () => {
                     {section.canCreate && section.supportsDelete !== false && (
                       <td className="px-4 py-3 text-right">
                         <div className="inline-flex items-center gap-2">
+                          {section.endpoint === 'assignments' && (() => {
+                            const subs = record.submissions || []
+                            const unread = subs.filter((s) => !s.viewed).length
+                            if (unread > 0) {
+                              return (
+                                <button
+                                  onClick={async () => {
+                                    try {
+                                      await axios.put(`${API_URL}/teacher/assignments/${record._id || record.id}/submissions/mark-read`)
+                                      await refreshCurrentSection()
+                                    } catch (err) {
+                                      setError(err.response?.data?.message || 'Failed to mark submissions read')
+                                    }
+                                  }}
+                                  className="rounded-lg border border-amber-200 px-3 py-2 text-xs font-semibold text-amber-700 hover:bg-amber-50"
+                                >
+                                  Mark read ({unread})
+                                </button>
+                              )
+                            }
+                            return null
+                          })()}
+
+                          <button
+                            onClick={async () => {
+                              try {
+                                const res = await axios.get(`${API_URL}/teacher/assignments/${record._id || record.id}/submissions`)
+                                const submissions = (res.data.submissions || []).map((s) => ({
+                                  ...s,
+                                  fileUrl: s.submittedFile ? `${API_HOST}${s.submittedFile}` : ''
+                                }))
+                                const drafts = submissions.reduce((accumulator, item) => {
+                                  accumulator[String(item.studentId)] = {
+                                    marksObtained: item.marksObtained ?? '',
+                                    feedback: item.feedback || ''
+                                  }
+                                  return accumulator
+                                }, {})
+                                setSubmissionsModal({ open: true, assignmentId: record._id || record.id, submissions, drafts, readerUrl: '' })
+                              } catch (err) {
+                                setError(err.response?.data?.message || 'Failed to load submissions')
+                              }
+                            }}
+                            className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                          >
+                            Submissions
+                          </button>
+
                           <button onClick={() => handleEdit(record)} className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100">Edit</button>
                           <button onClick={() => handleDelete(record)} className="rounded-lg border border-rose-200 px-3 py-2 text-xs font-semibold text-rose-700 hover:bg-rose-50">Delete</button>
                         </div>
@@ -657,6 +866,117 @@ const TeacherDashboard = () => {
         <h1 className="mt-4 text-4xl font-bold tracking-tight">{section.title}</h1>
         <p className="mt-3 max-w-2xl text-sm text-slate-200">{section.description}</p>
       </div>
+      {submissionsModal.open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40 p-4">
+          <div className="w-full max-w-3xl rounded-2xl bg-white p-6 shadow-lg">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold">Submissions</h3>
+              <button onClick={() => setSubmissionsModal({ open: false, assignmentId: null, submissions: [], drafts: {}, readerUrl: '' })} className="text-sm text-slate-500">Close</button>
+            </div>
+            <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.4fr_1fr]">
+              <div className="overflow-x-auto rounded-xl border border-slate-200">
+                <table className="min-w-full text-sm">
+                <thead className="bg-slate-50">
+                  <tr>
+                    <th className="px-3 py-2 text-left">Student</th>
+                    <th className="px-3 py-2 text-left">Roll</th>
+                    <th className="px-3 py-2 text-left">Submitted</th>
+                    <th className="px-3 py-2 text-left">Viewed</th>
+                    <th className="px-3 py-2 text-left">Mark</th>
+                    <th className="px-3 py-2 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {submissionsModal.submissions.map((s, i) => (
+                    <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50'}>
+                      <td className="px-3 py-2">{s.name}</td>
+                      <td className="px-3 py-2">{s.rollNumber || '—'}</td>
+                      <td className="px-3 py-2">{s.submittedDate ? new Date(s.submittedDate).toLocaleString() : '—'}</td>
+                      <td className="px-3 py-2">{s.viewed ? 'Yes' : 'No'}</td>
+                      <td className="px-3 py-2 min-w-[240px]">
+                        <div className="flex flex-col gap-2">
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.5"
+                            value={submissionsModal.drafts?.[String(s.studentId)]?.marksObtained ?? ''}
+                            onChange={(event) => updateSubmissionDraft(s.studentId, 'marksObtained', event.target.value)}
+                            placeholder="Marks"
+                            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-xs"
+                          />
+                          <input
+                            type="text"
+                            value={submissionsModal.drafts?.[String(s.studentId)]?.feedback ?? ''}
+                            onChange={(event) => updateSubmissionDraft(s.studentId, 'feedback', event.target.value)}
+                            placeholder="Feedback"
+                            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-xs"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleMarkSubmission(s)}
+                            className="rounded-lg border border-blue-200 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-50"
+                          >
+                            Save Mark
+                          </button>
+                        </div>
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        <div className="flex items-center justify-end gap-2">
+                          {s.fileUrl ? (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => setSubmissionsModal((current) => ({ ...current, readerUrl: s.fileUrl }))}
+                                className="rounded-lg border border-blue-200 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-50"
+                              >
+                                Read
+                              </button>
+                              <a href={s.fileUrl} target="_blank" rel="noopener noreferrer" className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100">Download</a>
+                            </>
+                          ) : <span className="text-slate-500">No file</span>}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                  {!submissionsModal.submissions.length && (
+                    <tr><td colSpan={6} className="px-3 py-8 text-center text-slate-500">No submissions yet.</td></tr>
+                  )}
+                </tbody>
+                </table>
+              </div>
+
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-900">Read Preview</p>
+                    <p className="text-xs text-slate-500">Open a submission to preview it here.</p>
+                  </div>
+                  {submissionsModal.readerUrl && (
+                    <button
+                      type="button"
+                      onClick={() => setSubmissionsModal((current) => ({ ...current, readerUrl: '' }))}
+                      className="text-xs font-semibold text-slate-500 hover:text-slate-700"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+                {submissionsModal.readerUrl ? (
+                  <iframe
+                    title="Submission Preview"
+                    src={submissionsModal.readerUrl}
+                    className="h-[520px] w-full rounded-lg border border-slate-200 bg-white"
+                  />
+                ) : (
+                  <div className="flex h-[520px] items-center justify-center rounded-lg border border-dashed border-slate-300 bg-white text-sm text-slate-500">
+                    No submission selected.
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {error && <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>}
 

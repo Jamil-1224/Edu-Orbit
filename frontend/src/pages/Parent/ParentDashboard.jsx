@@ -81,7 +81,7 @@ const ParentDashboard = () => {
               <StatCard
                 icon={DollarSign}
                 label="Pending Fees"
-                value={`₹${(stats.pendingFees || 0).toLocaleString()}`}
+                value={`৳${(stats.pendingFees || 0).toLocaleString()}`}
                 color="bg-orange-500"
               />
               <StatCard
@@ -144,7 +144,7 @@ const ParentDashboard = () => {
                   </div>
                   <div className="p-3 bg-orange-50 rounded-lg">
                     <p className="text-sm text-gray-600">Pending Fees</p>
-                    <p className="text-2xl font-bold text-orange-600">₹{(stats.pendingFees || 0).toLocaleString()}</p>
+                    <p className="text-2xl font-bold text-orange-600">৳{(stats.pendingFees || 0).toLocaleString()}</p>
                   </div>
                 </div>
               </div>

@@ -1,15 +1,35 @@
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
+const multer = require('multer');
 const { authenticate, authorize } = require('../middleware/auth');
 const User = require('../models/User');
 const Student = require('../models/Student');
 const Attendance = require('../models/Attendance');
 const Marks = require('../models/Marks');
 const Assignment = require('../models/Assignment');
+const Class = require('../models/Class');
 const Fee = require('../models/Fee');
 const Notice = require('../models/Notice');
 const LibraryBook = require('../models/Library');
 
 const router = express.Router();
+const assignmentUploadDir = path.join(__dirname, '..', 'uploads', 'assignments', 'submissions');
+
+fs.mkdirSync(assignmentUploadDir, { recursive: true });
+
+const submissionStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, assignmentUploadDir),
+  filename: (req, file, cb) => {
+    const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
+    cb(null, `${Date.now()}-${safeName}`);
+  }
+});
+
+const submissionUpload = multer({
+  storage: submissionStorage,
+  limits: { fileSize: 15 * 1024 * 1024 }
+});
 
 const dayOrder = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
@@ -38,6 +58,35 @@ const gpaFromPercentage = (percentage) => {
 };
 
 const formatDate = (value) => (value ? new Date(value).toISOString() : null);
+
+const getObjectIdString = (value) => String(value?._id || value || '').trim();
+
+const buildNoticeQuery = (student) => ({
+  $or: [
+    { targetAudience: { $in: ['student'] } },
+    { targetClass: student.class?._id || student.class }
+  ]
+});
+
+const markNoticesAsRead = async (noticeIds, userId) => {
+  if (!noticeIds.length) return;
+  await Notice.updateMany(
+    { _id: { $in: noticeIds } },
+    { $addToSet: { readBy: userId } }
+  );
+};
+
+const serializeNotices = (notices, userId) => notices.map((notice) => ({
+  id: notice._id,
+  title: notice.title,
+  content: notice.content,
+  category: notice.category,
+  date: formatDate(notice.createdAt),
+  isUrgent: notice.isUrgent,
+  isRead: true,
+  attachment: notice.attachments?.[0] || null,
+  targetAudience: notice.targetAudience || []
+}));
 
 const getStudentContext = async (userId) => {
   const student = await Student.findOne({ userId })
@@ -144,8 +193,49 @@ const buildDashboardData = async (student) => {
     }
   });
 
+  // Fallback: if no assignments found, try matching by class name (handles malformed classId storage)
+  let resolvedAssignments = assignments;
+  if (!resolvedAssignments.length && student.class && student.class.name) {
+    try {
+      const classDocs = await Class.find({ name: String(student.class.name).trim() }).select('_id').lean();
+      if (classDocs.length) {
+        const ids = classDocs.map((c) => String(c._id));
+        resolvedAssignments = await Assignment.find({ classId: { $in: ids } })
+          .populate('subjectId', 'name code')
+          .populate('assignedBy', 'name')
+          .sort({ dueDate: 1 })
+          .lean();
+      }
+    } catch (fallbackError) {
+      // Ignore fallback errors and continue with the original list
+    }
+  }
+
   const schedule = buildSchedule(student.class);
-  const pendingAssignments = assignments.filter((assignment) => new Date(assignment.dueDate) >= new Date());
+
+  const assignmentCards = (resolvedAssignments || []).map((assignment) => {
+    const submission = assignment.submissions?.find((item) => String(item.studentId) === String(student._id));
+    const dueDateValue = assignment.dueDate ? new Date(assignment.dueDate) : null;
+    const isOverdue = dueDateValue ? dueDateValue < new Date() : false;
+    const status = submission ? 'submitted' : (isOverdue ? 'overdue' : 'pending');
+
+    return {
+      id: assignment._id,
+      title: assignment.title,
+      subject: assignment.subjectId?.name || 'Subject',
+      description: assignment.description || assignment.instructions || '',
+      teacher: assignment.assignedBy?.name || 'Teacher',
+      assignedDate: formatDate(assignment.createdAt),
+      dueDate: formatDate(assignment.dueDate),
+      status,
+      marks: submission?.marksObtained || 0,
+      maxMarks: assignment.totalMarks || 0,
+      submittedDate: submission?.submittedDate ? formatDate(submission.submittedDate) : null,
+      feedback: submission?.feedback || null
+    };
+  });
+
+  const openAssignments = assignmentCards.filter((assignment) => assignment.status !== 'submitted');
 
   return {
     profile: {
@@ -159,7 +249,7 @@ const buildDashboardData = async (student) => {
         ? Number((marks.reduce((sum, mark) => sum + gpaFromPercentage(mark.percentage || 0), 0) / marks.length).toFixed(2))
         : 0,
       attendancePercentage: attendanceSummary.attendancePercentage,
-      assignmentCount: pendingAssignments.length,
+      assignmentCount: assignmentCards.length,
       feeStatus: feeSummary.pendingAmount > 0 ? `${feeSummary.pendingAmount.toLocaleString()} due` : 'Paid',
       totalMarks: marks.length
     },
@@ -169,23 +259,7 @@ const buildDashboardData = async (student) => {
       grade: mark.grade || gradeFromPercentage(mark.percentage || 0),
       percentage: mark.percentage || 0
     })),
-    pendingAssignments: pendingAssignments.map((assignment) => {
-      const submission = assignment.submissions?.find((item) => String(item.studentId) === String(student._id));
-      return {
-        id: assignment._id,
-        title: assignment.title,
-        subject: assignment.subjectId?.name || 'Subject',
-        description: assignment.description || assignment.instructions || '',
-        teacher: assignment.assignedBy?.name || 'Teacher',
-        assignedDate: formatDate(assignment.createdAt),
-        dueDate: formatDate(assignment.dueDate),
-        status: submission ? 'submitted' : new Date(assignment.dueDate) < new Date() ? 'overdue' : 'pending',
-        marks: submission?.marksObtained || 0,
-        maxMarks: assignment.totalMarks || 0,
-        submittedDate: submission?.submittedDate ? formatDate(submission.submittedDate) : null,
-        feedback: submission?.feedback || null
-      };
-    }),
+    pendingAssignments: openAssignments,
     notices: notices.map((notice) => ({
       id: notice._id,
       title: notice.title,
@@ -367,11 +441,60 @@ router.get('/marks', authenticate, authorize('student'), async (req, res) => {
 router.get('/assignments', authenticate, authorize('student'), async (req, res) => {
   try {
     const student = await getStudentContext(req.user.id);
-    const assignments = await Assignment.find({ classId: student.class?._id || student.class })
+    const classId = getObjectIdString(student.class);
+    const classFilter = classId ? { $in: [classId] } : { $in: [] };
+
+    console.log('[student.assignments] userId=', req.user.id, 'studentId=', student._id, 'resolvedClassId=', classId);
+
+    const assignments = await Assignment.find({ classId: classFilter })
+      .populate('classId', 'name section academicYear')
       .populate('subjectId', 'name code')
       .populate('assignedBy', 'name')
       .sort({ dueDate: 1 })
       .lean();
+
+    // Fallback: if no assignments found, try matching by class name (handles malformed classId storage)
+    if (!assignments.length && student.class && student.class.name) {
+      try {
+        const classDocs = await Class.find({ name: String(student.class.name).trim() }).select('_id').lean();
+        if (classDocs.length) {
+          const ids = classDocs.map((c) => String(c._id));
+          console.log('[student.assignments] fallback matching by class name, classIds=', ids);
+          const fallback = await Assignment.find({ classId: { $in: ids } })
+            .populate('classId', 'name section academicYear')
+            .populate('subjectId', 'name code')
+            .populate('assignedBy', 'name')
+            .sort({ dueDate: 1 })
+            .lean();
+          if (fallback.length) {
+            console.log('[student.assignments] fallback found assignments count=', fallback.length);
+            return res.json({ success: true, assignments: fallback.map((assignment) => {
+              const submission = assignment.submissions?.find((item) => String(item.studentId) === String(student._id));
+              return {
+                id: assignment._id,
+                title: assignment.title,
+                classId: assignment.classId?._id || assignment.classId || null,
+                className: assignment.classId ? (/^class\s+/i.test(String(assignment.classId.name || '').trim()) ? assignment.classId.name : `Class ${assignment.classId.name}`.trim()) : '',
+                subject: assignment.subjectId?.name || 'Subject',
+                description: assignment.description || assignment.instructions || '',
+                teacher: assignment.assignedBy?.name || 'Teacher',
+                assignedDate: formatDate(assignment.createdAt),
+                dueDate: formatDate(assignment.dueDate),
+                status: submission ? 'submitted' : new Date(assignment.dueDate) < new Date() ? 'overdue' : 'pending',
+                marks: submission?.marksObtained || 0,
+                maxMarks: assignment.totalMarks || 0,
+                submittedDate: submission?.submittedDate ? formatDate(submission.submittedDate) : null,
+                feedback: submission?.feedback || null,
+                submittedFile: submission?.submittedFile || null,
+                attachments: Array.isArray(assignment.attachments) ? assignment.attachments : []
+              };
+            }) });
+          }
+        }
+      } catch (fallbackError) {
+        console.error('[student.assignments] fallback error', fallbackError.message);
+      }
+    }
 
     res.json({
       success: true,
@@ -380,6 +503,8 @@ router.get('/assignments', authenticate, authorize('student'), async (req, res) 
         return {
           id: assignment._id,
           title: assignment.title,
+          classId: assignment.classId?._id || assignment.classId || null,
+          className: assignment.classId ? (/^class\s+/i.test(String(assignment.classId.name || '').trim()) ? assignment.classId.name : `Class ${assignment.classId.name}`.trim()) : '',
           subject: assignment.subjectId?.name || 'Subject',
           description: assignment.description || assignment.instructions || '',
           teacher: assignment.assignedBy?.name || 'Teacher',
@@ -389,24 +514,138 @@ router.get('/assignments', authenticate, authorize('student'), async (req, res) 
           marks: submission?.marksObtained || 0,
           maxMarks: assignment.totalMarks || 0,
           submittedDate: submission?.submittedDate ? formatDate(submission.submittedDate) : null,
-          feedback: submission?.feedback || null
+          feedback: submission?.feedback || null,
+          submittedFile: submission?.submittedFile || null,
+          attachments: Array.isArray(assignment.attachments) ? assignment.attachments : []
         };
       })
+    });
+    console.log('[student.assignments] returned assignments count=', assignments.length);
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Temporary debug endpoint to inspect student context and assignment matching
+router.get('/debug/assignments-check', authenticate, authorize('student'), async (req, res) => {
+  try {
+    const student = await getStudentContext(req.user.id);
+    const classId = getObjectIdString(student.class);
+
+    const assignmentsByClass = classId
+      ? await Assignment.find({ classId }).limit(50).lean()
+      : [];
+
+    const sampleAssignments = await Assignment.find().limit(5).lean();
+
+    res.json({
+      success: true,
+      student,
+      classId,
+      assignmentsByClassCount: assignmentsByClass.length,
+      sampleAssignmentsCount: sampleAssignments.length,
+      assignmentsByClass: assignmentsByClass.slice(0, 10),
+      sampleAssignments
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 });
 
-router.post('/assignments/:assignmentId/submit', authenticate, authorize('student'), async (req, res) => {
+// Enhanced debug endpoint
+router.get('/debug/assignments-detailed', authenticate, authorize('student'), async (req, res) => {
+  try {
+    const student = await getStudentContext(req.user.id);
+    const classId = getObjectIdString(student.class);
+    const classFilter = classId ? { $in: [classId] } : { $in: [] };
+
+    console.log('[debug/detailed] student._id=', student._id, 'student.class=', student.class, 'classId(resolved)=', classId);
+
+    // Count all assignments
+    const totalAssignments = await Assignment.countDocuments({});
+
+    // Get all assignments (no filter) to see what exists
+    const allAssignments = await Assignment.find().select('_id classId title dueDate').limit(20).lean();
+
+    // Get assignments matching the filter
+    const matchedByFilter = await Assignment.find({ classId: classFilter }).select('_id classId title dueDate').lean();
+
+    // If classId exists, get assignments matching that exact classId
+    const matchedByExactId = classId ? await Assignment.find({ classId: classId }).select('_id classId title dueDate').lean() : [];
+
+    // Try matching by student.class._id directly
+    const matchedByStudentClass = student.class ? await Assignment.find({ classId: student.class._id || student.class }).select('_id classId title dueDate').lean() : [];
+
+    res.json({
+      success: true,
+      student: {
+        _id: student._id,
+        class: student.class,
+        classIdResolved: classId
+      },
+      assignments: {
+        totalInDatabase: totalAssignments,
+        allAssignments,
+        matchedByFilter,
+        matchedByExactId,
+        matchedByStudentClass
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message, stack: error.stack });
+  }
+});
+
+// Test endpoint: show ALL assignments WITHOUT filtering
+router.get('/debug/all-assignments-no-filter', authenticate, authorize('student'), async (req, res) => {
+  try {
+    const allAssignments = await Assignment.find()
+      .populate('classId', 'name _id')
+      .populate('subjectId', 'name')
+      .lean();
+
+    const student = await getStudentContext(req.user.id);
+
+    res.json({
+      success: true,
+      message: 'All assignments in database (NO FILTER)',
+      student_class: student.class,
+      student_class_id: student.class?._id,
+      total_assignments: allAssignments.length,
+      assignments: allAssignments.map((a) => ({
+        id: a._id,
+        title: a.title,
+        classId: a.classId?._id,
+        className: a.classId?.name,
+        subject: a.subjectId?.name
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+router.post('/assignments/:assignmentId/submit', authenticate, authorize('student'), submissionUpload.single('file'), async (req, res) => {
   try {
     const student = await getStudentContext(req.user.id);
     const { assignmentId } = req.params;
-    const { submittedFile = null, comments = '' } = req.body;
+    const { comments = '' } = req.body;
 
     const assignment = await Assignment.findById(assignmentId);
     if (!assignment) {
       return res.status(404).json({ success: false, message: 'Assignment not found' });
+    }
+
+    if (assignment.classId && student.class && String(assignment.classId) !== getObjectIdString(student.class)) {
+      return res.status(403).json({ success: false, message: 'You cannot submit this assignment' });
+    }
+
+    const submittedFile = req.file
+      ? `/uploads/assignments/submissions/${req.file.filename}`
+      : (req.body.submittedFile || null);
+
+    if (!submittedFile) {
+      return res.status(400).json({ success: false, message: 'A file or submission link is required' });
     }
 
     const existingSubmission = assignment.submissions.find((item) => String(item.studentId) === String(student._id));
@@ -424,7 +663,7 @@ router.post('/assignments/:assignmentId/submit', authenticate, authorize('studen
     }
 
     await assignment.save();
-    res.status(201).json({ success: true, message: 'Assignment submitted' });
+    res.status(201).json({ success: true, message: 'Assignment submitted', submittedFile });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -470,25 +709,24 @@ router.get('/schedule', authenticate, authorize('student'), async (req, res) => 
 router.get('/notices', authenticate, authorize('student'), async (req, res) => {
   try {
     const student = await getStudentContext(req.user.id);
-    const notices = await Notice.find({
-      $or: [
-        { targetAudience: { $in: ['student'] } },
-        { targetClass: student.class?._id || student.class }
-      ]
-    }).sort({ createdAt: -1 }).lean();
+    const notices = await Notice.find(buildNoticeQuery(student)).sort({ createdAt: -1 }).lean();
+    await markNoticesAsRead(notices.map((notice) => notice._id), req.user.id);
 
     res.json({
       success: true,
-      notices: notices.map((notice) => ({
-        id: notice._id,
-        title: notice.title,
-        content: notice.content,
-        category: notice.category,
-        date: formatDate(notice.createdAt),
-        isUrgent: notice.isUrgent,
-        attachment: notice.attachments?.[0] || null
-      }))
+      notices: serializeNotices(notices, req.user.id)
     });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+router.post('/notices/mark-read', authenticate, authorize('student'), async (req, res) => {
+  try {
+    const student = await getStudentContext(req.user.id);
+    const notices = await Notice.find(buildNoticeQuery(student)).select('_id').lean();
+    await markNoticesAsRead(notices.map((notice) => notice._id), req.user.id);
+    res.json({ success: true, message: 'Notices marked as read' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

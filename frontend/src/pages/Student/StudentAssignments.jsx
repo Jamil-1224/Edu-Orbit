@@ -1,13 +1,15 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { FileText, Upload, CheckCircle, Clock, AlertCircle } from 'lucide-react'
+import { FileText, Upload, CheckCircle, Clock, AlertCircle, Paperclip } from 'lucide-react'
 import axios from 'axios'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api'
+const SERVER_URL = API_URL.replace(/\/api\/?$/, '')
 
 const StudentAssignments = () => {
   const [filter, setFilter] = useState('all')
   const [submitModal, setSubmitModal] = useState(null)
-  const [uploadFile, setUploadFile] = useState(null)
+  const [submissionFile, setSubmissionFile] = useState(null)
+  const [submissionComments, setSubmissionComments] = useState('')
   const [assignments, setAssignments] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -50,16 +52,21 @@ const StudentAssignments = () => {
   }
 
   const handleSubmit = async () => {
-    if (!submitModal || !uploadFile) return
+    if (!submitModal || !submissionFile) return
+
     const formData = new FormData()
-    formData.append('file', uploadFile)
+    formData.append('file', submissionFile)
+    formData.append('comments', submissionComments)
 
     try {
-      await axios.post(`${API_URL}/student/assignments/${submitModal}/submit`, formData, { headers: { 'Content-Type': 'multipart/form-data' } })
+      await axios.post(`${API_URL}/student/assignments/${submitModal}/submit`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      })
       const response = await axios.get(`${API_URL}/student/assignments`)
       setAssignments(response.data.assignments || [])
       setSubmitModal(null)
-      setUploadFile(null)
+      setSubmissionFile(null)
+      setSubmissionComments('')
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to submit assignment')
     }
@@ -123,7 +130,34 @@ const StudentAssignments = () => {
                   <div>
                     <h3 className="text-lg font-semibold text-gray-900">{assignment.title}</h3>
                     <p className="text-sm text-gray-600 mt-1">{assignment.description}</p>
-                    <div className="flex flex-wrap gap-2 mt-3"><span className="badge badge-blue text-xs">{assignment.subject}</span><span className="badge badge-gray text-xs">{assignment.teacher}</span></div>
+                    <div className="flex flex-wrap gap-2 mt-3">
+                      <span className="badge badge-blue text-xs">{assignment.subject}</span>
+                      <span className="badge badge-gray text-xs">{assignment.teacher}</span>
+                      {assignment.className && <span className="badge badge-green text-xs">{assignment.className}</span>}
+                    </div>
+                    {assignment.attachments?.length > 0 && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {assignment.attachments.map((attachment, index) => (
+                          <a key={`${attachment}-${index}`} href={`${SERVER_URL}${attachment}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-700 hover:bg-slate-200">
+                            <Paperclip size={12} />
+                            Attachment {index + 1}
+                          </a>
+                        ))}
+                      </div>
+                    )}
+                    {assignment.submittedFile && assignment.status === 'submitted' && (
+                      <div className="mt-3 text-xs text-slate-600">
+                        Submitted file:{' '}
+                        <a
+                          href={`${SERVER_URL}${assignment.submittedFile}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="font-semibold text-blue-600 underline"
+                        >
+                          Open submission
+                        </a>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -156,11 +190,24 @@ const StudentAssignments = () => {
             <h2 className="text-2xl font-bold text-gray-900 mb-4">Submit Assignment</h2>
             <div className="mb-4">
               <label className="form-label">Upload File</label>
-              <input type="file" onChange={(e) => setUploadFile(e.target.files?.[0] || null)} className="form-input" />
+              <input
+                type="file"
+                onChange={(e) => setSubmissionFile(e.target.files?.[0] || null)}
+                className="form-input"
+              />
+            </div>
+            <div className="mb-4">
+              <label className="form-label">Comments</label>
+              <textarea
+                value={submissionComments}
+                onChange={(e) => setSubmissionComments(e.target.value)}
+                className="form-input min-h-28"
+                placeholder="Optional notes for the teacher"
+              />
             </div>
             <div className="flex gap-3 justify-end">
-              <button onClick={() => { setSubmitModal(null); setUploadFile(null) }} className="btn btn-secondary">Cancel</button>
-              <button onClick={handleSubmit} className="btn btn-primary" disabled={!uploadFile}>Submit Assignment</button>
+              <button onClick={() => { setSubmitModal(null); setSubmissionFile(null); setSubmissionComments('') }} className="btn btn-secondary">Cancel</button>
+              <button onClick={handleSubmit} className="btn btn-primary" disabled={!submissionFile}>Submit Assignment</button>
             </div>
           </div>
         </div>

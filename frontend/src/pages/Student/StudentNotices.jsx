@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { Bell, Download, Trash2 } from 'lucide-react'
+import { Bell, Download } from 'lucide-react'
 import axios from 'axios'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api'
@@ -29,24 +29,6 @@ const StudentNotices = () => {
   const urgentCount = notices.filter((notice) => notice.isUrgent && !notice.isRead).length
   const getCategoryColor = (category) => ({ event: 'bg-blue-50 border-l-4 border-blue-500', academic: 'bg-green-50 border-l-4 border-green-500', holiday: 'bg-purple-50 border-l-4 border-purple-500', alert: 'bg-red-50 border-l-4 border-red-500' }[category] || 'bg-gray-50 border-l-4 border-gray-500')
   const getCategoryBadgeColor = (category) => ({ event: 'badge-blue', academic: 'badge-green', holiday: 'badge-purple', alert: 'badge-red' }[category] || 'badge-gray')
-
-  const handleMarkAsRead = async (id) => {
-    try {
-      await axios.patch(`${API_URL}/student/notices/${id}/read`)
-      setNotices((current) => current.map((notice) => (notice.id === id ? { ...notice, isRead: true } : notice)))
-    } catch (err) {
-      setError(err.response?.data?.message || 'Failed to mark notice as read')
-    }
-  }
-
-  const handleDelete = async (id) => {
-    try {
-      await axios.delete(`${API_URL}/student/notices/${id}`)
-      setNotices((current) => current.filter((notice) => notice.id !== id))
-    } catch (err) {
-      setError(err.response?.data?.message || 'Failed to remove notice')
-    }
-  }
 
   if (loading) return <div className="flex items-center justify-center min-h-[50vh]"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600" /></div>
   if (error) return <div className="bg-red-50 border border-red-200 rounded-xl p-6 text-red-700">{error}</div>
@@ -93,10 +75,6 @@ const StudentNotices = () => {
                   {notice.attachment && <button className="btn btn-sm btn-secondary flex items-center gap-1"><Download size={16} />Download</button>}
                 </div>
               </div>
-            </div>
-            <div className="mt-4 flex gap-2">
-              {!notice.isRead && <button onClick={() => handleMarkAsRead(notice.id)} className="btn btn-sm btn-primary">Mark as Read</button>}
-              <button onClick={() => handleDelete(notice.id)} className="btn btn-sm btn-secondary"><Trash2 size={16} /></button>
             </div>
           </div>
         )) : <div className="card text-center py-12"><Bell className="mx-auto text-gray-400 mb-4" size={48} /><p className="text-gray-600">No notices in this category</p></div>}

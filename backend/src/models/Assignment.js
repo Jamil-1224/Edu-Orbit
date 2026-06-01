@@ -39,6 +39,10 @@ const assignmentSchema = new mongoose.Schema({
     submittedDate: Date,
     marksObtained: Number,
     feedback: String,
+    viewed: {
+      type: Boolean,
+      default: false
+    },
     gradedDate: Date
   }],
   createdAt: {

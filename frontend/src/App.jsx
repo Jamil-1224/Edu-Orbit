@@ -10,6 +10,7 @@ import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
 import AdminDashboard from './pages/Admin/AdminDashboard'
 import TeacherDashboard from './pages/Teacher/TeacherDashboard'
+import TeacherProfile from './pages/Teacher/TeacherProfile'
 import StudentDashboard from './pages/Student/StudentDashboard'
 import ParentDashboard from './pages/Parent/ParentDashboard'
 import NotFoundPage from './pages/NotFoundPage'
@@ -18,11 +19,8 @@ import NotFoundPage from './pages/NotFoundPage'
 import StudentProfile from './pages/Student/StudentProfile'
 import StudentAttendance from './pages/Student/StudentAttendance'
 import StudentResults from './pages/Student/StudentResults'
-import StudentRoutine from './pages/Student/StudentRoutine'
 import StudentAssignments from './pages/Student/StudentAssignments'
 import StudentNotices from './pages/Student/StudentNotices'
-import StudentLibrary from './pages/Student/StudentLibrary'
-import StudentFees from './pages/Student/StudentFees'
 
 // Parent Pages
 import ParentChildren from './pages/Parent/ParentChildren'
@@ -74,6 +72,14 @@ function App() {
               </ProtectedRoute>
             }
           />
+          <Route
+            path="/teacher/profile"
+            element={
+              <ProtectedRoute requiredRole="teacher">
+                <TeacherProfile />
+              </ProtectedRoute>
+            }
+          />
           {/* Student Routes */}
           <Route
             path="/student"
@@ -108,14 +114,6 @@ function App() {
             }
           />
           <Route
-            path="/student/routine"
-            element={
-              <ProtectedRoute requiredRole="student">
-                <StudentRoutine />
-              </ProtectedRoute>
-            }
-          />
-          <Route
             path="/student/assignments"
             element={
               <ProtectedRoute requiredRole="student">
@@ -128,22 +126,6 @@ function App() {
             element={
               <ProtectedRoute requiredRole="student">
                 <StudentNotices />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/student/library"
-            element={
-              <ProtectedRoute requiredRole="student">
-                <StudentLibrary />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/student/fees"
-            element={
-              <ProtectedRoute requiredRole="student">
-                <StudentFees />
               </ProtectedRoute>
             }
           />

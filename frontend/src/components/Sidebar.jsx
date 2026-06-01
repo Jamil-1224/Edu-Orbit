@@ -40,11 +40,11 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
     ],
     teacher: [
       { label: 'Dashboard', icon: LayoutDashboard, path: '/teacher' },
+      { label: 'My Profile', icon: User, path: '/teacher/profile' },
       { label: 'My Classes', icon: BookOpen, path: '/teacher/classes' },
       { label: 'Attendance', icon: ClipboardList, path: '/teacher/attendance' },
       { label: 'Marks', icon: BarChart3, path: '/teacher/marks' },
       { label: 'Assignments', icon: FileText, path: '/teacher/assignments' },
-      { label: 'Routine', icon: Calendar, path: '/teacher/routine' },
       { label: 'Notices', icon: Bell, path: '/teacher/notices' }
     ],
     student: [
@@ -52,11 +52,9 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
       { label: 'My Profile', icon: User, path: '/student/profile' },
       { label: 'Attendance', icon: ClipboardList, path: '/student/attendance' },
       { label: 'My Results', icon: BarChart3, path: '/student/results' },
-      { label: 'My Routine', icon: Calendar, path: '/student/routine' },
       { label: 'Assignments', icon: FileText, path: '/student/assignments' },
-      { label: 'Notices', icon: Bell, path: '/student/notices' },
-      { label: 'Library', icon: Library, path: '/student/library' },
-      { label: 'My Fees', icon: DollarSign, path: '/student/fees' }
+      { label: 'Notices', icon: Bell, path: '/student/notices' }
+      // Removed: Routine, Library, Fees (kept dashboard notices panel)
     ],
     parent: [
       { label: 'Dashboard', icon: LayoutDashboard, path: '/parent' },

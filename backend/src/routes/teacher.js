@@ -1,4 +1,5 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const { authenticate, authorize } = require('../middleware/auth');
 const { getTeacherDashboardData } = require('../services/dashboardService');
 const User = require('../models/User');
@@ -22,6 +23,12 @@ const toDate = (value) => {
 const toNumber = (value, fallback = 0) => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const toBoolean = (value) => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') return ['true', '1', 'yes', 'on'].includes(value.toLowerCase());
+  return Boolean(value);
 };
 
 const toArray = (value) => {
@@ -113,8 +120,10 @@ const getAllowedClassIds = async (teacher) => {
   const assigned = (teacher.assignedClasses || []).map((item) => String(item._id || item));
   if (assigned.length) return assigned;
 
-  const classDocs = await Class.find().select('_id').lean();
-  return classDocs.map((item) => String(item._id));
+  const teacherClasses = await Class.find({ classTeacherId: teacher._id }).select('_id').lean();
+  if (teacherClasses.length) return teacherClasses.map((item) => String(item._id));
+
+  return [];
 };
 
 const getAllowedSubjectIds = async (teacher, allowedClassIds = []) => {
@@ -130,15 +139,29 @@ const getAllowedSubjectIds = async (teacher, allowedClassIds = []) => {
     if (ids.size) return Array.from(ids);
   }
 
-  const subjectDocs = await Subject.find().select('_id').lean();
-  return subjectDocs.map((item) => String(item._id));
+  return [];
 };
 
 const populateClass = (query) => query.populate('classTeacherId', 'userId employeeId designation').populate({ path: 'classTeacherId', populate: { path: 'userId', select: 'name email' } }).populate('subjects', 'name code');
 
 const summarizeAttendanceRecords = (records) => {
-  const total = records.length;
-  const present = records.filter((item) => item.status === 'present' || item.status === 'late').length;
+  // Deduplicate records by date (one record per student per day)
+  if (!records || !records.length) return { total: 0, present: 0, percentage: 0 };
+
+  const byDate = {};
+  for (const r of records) {
+    // normalize date to YYYY-MM-DD in UTC to avoid timezone duplicates
+    const d = r.date ? new Date(r.date) : null;
+    const key = d ? d.toISOString().slice(0, 10) : String(Math.random());
+    // keep the latest record for that date
+    if (!byDate[key] || new Date(r._id?.getTimestamp?.() || r._id?._bsontype || 0) > new Date(byDate[key].date || 0)) {
+      byDate[key] = r;
+    }
+  }
+
+  const uniqueRecords = Object.values(byDate);
+  const total = uniqueRecords.length;
+  const present = uniqueRecords.filter((item) => item.status === 'present' || item.status === 'late').length;
   return {
     total,
     present,
@@ -595,10 +618,41 @@ router.get('/assignments', authenticate, authorize('teacher'), async (req, res) 
     const assignments = await Assignment.find({ classId: { $in: classIds } })
       .populate('classId', 'name section academicYear')
       .populate('subjectId', 'name code')
+      .populate({ path: 'submissions.studentId', populate: { path: 'userId', select: 'name' }, select: 'rollNumber userId' })
       .sort({ createdAt: -1 })
       .lean();
 
     res.json({ success: true, assignments });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+});
+
+router.get('/assignments/:assignmentId/submissions', authenticate, authorize('teacher'), async (req, res) => {
+  try {
+    const teacher = await getTeacherContextOrThrow(req.user.id);
+    const classIds = await getAllowedClassIds(teacher);
+    const { assignmentId } = req.params;
+
+    const assignment = await Assignment.findById(assignmentId)
+      .populate({ path: 'submissions.studentId', populate: { path: 'userId', select: 'name email' }, select: 'rollNumber userId' })
+      .lean();
+
+    if (!assignment) return res.status(404).json({ success: false, message: 'Assignment not found' });
+    if (!classIds.includes(String(assignment.classId))) return res.status(403).json({ success: false, message: 'You do not have access to this assignment' });
+
+    const submissions = (assignment.submissions || []).map((s) => ({
+      studentId: s.studentId?._id || s.studentId,
+      name: s.studentId?.userId?.name || 'Student',
+      rollNumber: s.studentId?.rollNumber || '',
+      submittedFile: s.submittedFile || '',
+      submittedDate: s.submittedDate || null,
+      marksObtained: s.marksObtained,
+      feedback: s.feedback,
+      viewed: Boolean(s.viewed)
+    }));
+
+    res.json({ success: true, submissions });
   } catch (error) {
     res.status(error.status || 500).json({ success: false, message: error.message });
   }
@@ -696,6 +750,39 @@ router.put('/assignments/:assignmentId/grade', authenticate, authorize('teacher'
   }
 });
 
+router.put('/assignments/:assignmentId/submissions/mark-read', authenticate, authorize('teacher'), async (req, res) => {
+  try {
+    const teacher = await getTeacherContextOrThrow(req.user.id);
+    const assignment = await Assignment.findById(req.params.assignmentId);
+
+    if (!assignment) {
+      return res.status(404).json({ success: false, message: 'Assignment not found' });
+    }
+
+    const classIds = await getAllowedClassIds(teacher);
+    if (!classIds.includes(String(assignment.classId))) {
+      return res.status(403).json({ success: false, message: 'You do not have access to this assignment' });
+    }
+
+    const nextSubmissions = (assignment.submissions || []).map((s) => ({
+      ...s.toObject ? s.toObject() : s,
+      viewed: true
+    }));
+
+    assignment.submissions = nextSubmissions;
+    await assignment.save();
+
+    const updated = await Assignment.findById(assignment._id)
+      .populate('classId', 'name section academicYear')
+      .populate('subjectId', 'name code')
+      .lean();
+
+    res.json({ success: true, message: 'All submissions marked read', assignment: updated });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+});
+
 router.get('/routine', authenticate, authorize('teacher'), async (req, res) => {
   try {
     const teacher = await getTeacherContextOrThrow(req.user.id);
@@ -727,8 +814,9 @@ router.put('/routine', authenticate, authorize('teacher'), async (req, res) => {
   try {
     const teacher = await getTeacherContextOrThrow(req.user.id);
     const { classId, day, periods } = req.body;
+    const normalizedDay = String(day || '').trim();
 
-    if (!classId || !day || !Array.isArray(periods)) {
+    if (!classId || !normalizedDay || !Array.isArray(periods)) {
       return res.status(400).json({ success: false, message: 'classId, day, and periods are required' });
     }
 
@@ -743,19 +831,93 @@ router.put('/routine', authenticate, authorize('teacher'), async (req, res) => {
     }
 
     const nextRoutines = Array.isArray(classDoc.routines) ? [...classDoc.routines] : [];
-    const index = nextRoutines.findIndex((entry) => entry.day === day);
-    const normalizedPeriods = periods.map((period) => ({
-      periodNumber: toNumber(period.periodNumber),
-      startTime: period.startTime,
-      endTime: period.endTime,
-      subject: period.subject || null,
-      teacher: period.teacher || teacher._id
-    }));
+    const index = nextRoutines.findIndex((entry) => String(entry.day || '').trim().toLowerCase() === normalizedDay.toLowerCase());
+
+    const shouldLookupSubjects = periods.some((period) => {
+      if (!period) return false;
+      let value = period.subject;
+      if (value && typeof value === 'object') {
+        value = value._id || value.id || value.value;
+      }
+      if (typeof value !== 'string') return false;
+      const trimmed = value.trim();
+      return Boolean(trimmed) && !mongoose.Types.ObjectId.isValid(trimmed);
+    });
+
+    const subjectDocs = shouldLookupSubjects
+      ? await Subject.find({ _id: { $in: classDoc.subjects || [] } }).select('_id name code').lean()
+      : null;
+
+    const normalizeSubjectId = (value) => {
+      if (!value) return null;
+
+      let raw = value;
+      if (raw && typeof raw === 'object') {
+        raw = raw._id || raw.id || raw.value;
+      }
+
+      if (typeof raw === 'string') {
+        raw = raw.trim();
+      }
+
+      if (!raw) return null;
+
+      if (typeof raw === 'string' && mongoose.Types.ObjectId.isValid(raw)) {
+        return raw;
+      }
+
+      if (!subjectDocs || !Array.isArray(subjectDocs)) {
+        const error = new Error('Subject must be a valid id (ObjectId).');
+        error.status = 400;
+        throw error;
+      }
+
+      const lowered = String(raw).toLowerCase();
+      const match = subjectDocs.find((subject) =>
+        String(subject.code || '').toLowerCase() === lowered
+        || String(subject.name || '').toLowerCase() === lowered
+      );
+
+      if (!match) {
+        const error = new Error(`Unknown subject '${raw}'. Use subject id or a subject code/name from the selected class.`);
+        error.status = 400;
+        throw error;
+      }
+
+      return match._id;
+    };
+
+    const normalizeTeacherId = (value) => {
+      if (!value) return teacher._id;
+      let raw = value;
+      if (raw && typeof raw === 'object') {
+        raw = raw._id || raw.id || raw.value;
+      }
+      if (typeof raw === 'string') raw = raw.trim();
+      if (typeof raw === 'string' && mongoose.Types.ObjectId.isValid(raw)) return raw;
+      return teacher._id;
+    };
+
+    const normalizedPeriods = periods.map((period, periodIndex) => {
+      if (!period || typeof period !== 'object') {
+        const error = new Error(`Periods JSON entry at index ${periodIndex} must be an object.`);
+        error.status = 400;
+        throw error;
+      }
+
+      return {
+        periodNumber: toNumber(period.periodNumber),
+        startTime: typeof period.startTime === 'string' ? period.startTime.trim() : period.startTime,
+        endTime: typeof period.endTime === 'string' ? period.endTime.trim() : period.endTime,
+        subject: normalizeSubjectId(period.subject),
+        teacher: normalizeTeacherId(period.teacher)
+      };
+    });
 
     if (index >= 0) {
       nextRoutines[index].periods = normalizedPeriods;
     } else {
-      nextRoutines.push({ day, periods: normalizedPeriods });
+      nextRoutines.push({ day: normalizedDay, periods: normalizedPeriods });
     }
 
     classDoc.routines = nextRoutines;
@@ -777,7 +939,8 @@ router.get('/notices', authenticate, authorize('teacher'), async (req, res) => {
     const notices = await Notice.find({
       $or: [
         { targetAudience: { $in: ['teacher'] } },
-        { targetClass: { $in: classIds } }
+        { targetClass: { $in: classIds } },
+        { createdBy: req.user.id }
       ]
     })
       .populate('createdBy', 'name email role')
@@ -786,6 +949,122 @@ router.get('/notices', authenticate, authorize('teacher'), async (req, res) => {
       .lean();
 
     res.json({ success: true, notices });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+});
+
+router.post('/notices', authenticate, authorize('teacher'), async (req, res) => {
+  try {
+    const teacher = await getTeacherContextOrThrow(req.user.id);
+    const { title, content, category, attachments, targetAudience, targetClass, isUrgent, expiryDate } = req.body;
+
+    if (!title || !content) {
+      return res.status(400).json({ success: false, message: 'Title and content are required' });
+    }
+
+    const audience = toArray(targetAudience).length ? toArray(targetAudience) : ['student'];
+    const classIds = await getAllowedClassIds(teacher);
+    const normalizedTargetClass = targetClass ? String(targetClass) : null;
+
+    if (normalizedTargetClass && !classIds.includes(normalizedTargetClass)) {
+      return res.status(403).json({ success: false, message: 'You do not have access to this class' });
+    }
+
+    const notice = await Notice.create({
+      title,
+      content,
+      category: category || 'general',
+      attachments: toArray(attachments),
+      createdBy: req.user.id,
+      targetAudience: audience,
+      targetClass: normalizedTargetClass,
+      isUrgent: toBoolean(isUrgent),
+      expiryDate: toDate(expiryDate)
+    });
+
+    const createdNotice = await Notice.findById(notice._id)
+      .populate('createdBy', 'name email role')
+      .populate('targetClass', 'name section academicYear')
+      .lean();
+
+    res.status(201).json({ success: true, message: 'Notice created', notice: createdNotice });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+});
+
+router.put('/notices/:id', authenticate, authorize('teacher'), async (req, res) => {
+  try {
+    const teacher = await getTeacherContextOrThrow(req.user.id);
+    const existing = await Notice.findById(req.params.id);
+
+    if (!existing) {
+      return res.status(404).json({ success: false, message: 'Notice not found' });
+    }
+
+    if (String(existing.createdBy) !== String(req.user.id)) {
+      return res.status(403).json({ success: false, message: 'You can only edit your own notices' });
+    }
+
+    const classIds = await getAllowedClassIds(teacher);
+    const { title, content, category, attachments, targetAudience, targetClass, isUrgent, expiryDate } = req.body;
+    const normalizedTargetClass = targetClass ? String(targetClass) : null;
+
+    if (normalizedTargetClass && !classIds.includes(normalizedTargetClass)) {
+      return res.status(403).json({ success: false, message: 'You do not have access to this class' });
+    }
+
+    const updated = await Notice.findByIdAndUpdate(
+      req.params.id,
+      {
+        ...(title !== undefined && { title }),
+        ...(content !== undefined && { content }),
+        ...(category !== undefined && { category }),
+        ...(attachments !== undefined && { attachments: toArray(attachments) }),
+        ...(targetAudience !== undefined && { targetAudience: toArray(targetAudience).length ? toArray(targetAudience) : ['student'] }),
+        ...(targetClass !== undefined && { targetClass: normalizedTargetClass }),
+        ...(isUrgent !== undefined && { isUrgent: toBoolean(isUrgent) }),
+        ...(expiryDate !== undefined && { expiryDate: toDate(expiryDate) }),
+        updatedAt: new Date()
+      },
+      { new: true }
+    )
+      .populate('createdBy', 'name email role')
+      .populate('targetClass', 'name section academicYear')
+      .lean();
+
+    res.json({ success: true, message: 'Notice updated', notice: updated });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+});
+
+router.delete('/notices/:id', authenticate, authorize('teacher'), async (req, res) => {
+  try {
+    const existing = await Notice.findById(req.params.id);
+
+    if (!existing) {
+      return res.status(404).json({ success: false, message: 'Notice not found' });
+    }
+
+    if (String(existing.createdBy) !== String(req.user.id)) {
+      return res.status(403).json({ success: false, message: 'You can only delete your own notices' });
+    }
+
+    await Notice.findByIdAndDelete(req.params.id);
+    res.json({ success: true, message: 'Notice deleted' });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+});
+
+// Get teacher profile (populated with user, classes and subjects)
+router.get('/profile', authenticate, authorize('teacher'), async (req, res) => {
+  try {
+    const teacher = await populateTeacherContext(req.user.id);
+    if (!teacher) return res.status(404).json({ success: false, message: 'Teacher profile not found' });
+    res.json({ success: true, teacher });
   } catch (error) {
     res.status(error.status || 500).json({ success: false, message: error.message });
   }

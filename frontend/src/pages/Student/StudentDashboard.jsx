@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { Routes, Route } from 'react-router-dom'
-import { BarChart3, FileText, DollarSign, Calendar, TrendingUp } from 'lucide-react'
+import { BarChart3, FileText, Bell, TrendingUp } from 'lucide-react'
 import axios from 'axios'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api'
@@ -48,10 +48,9 @@ const StudentDashboard = () => {
   }
 
   const stats = data?.stats || {}
-  const schedule = data?.schedule || []
   const recentGrades = data?.recentGrades || []
   const pendingAssignments = data?.pendingAssignments || []
-  const upcomingEvents = data?.upcomingEvents || []
+  const notices = data?.notices || []
 
   return (
     <Routes>
@@ -85,44 +84,34 @@ const StudentDashboard = () => {
                 color="bg-purple-500"
               />
               <StatCard
-                icon={DollarSign}
-                label="Fee Status"
-                value={stats.feeStatus || 'N/A'}
+                icon={Bell}
+                label="Notices"
+                value={notices.length}
                 color="bg-orange-500"
               />
             </div>
 
             {/* Main Content */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              {/* Class Schedule */}
+              {/* Latest Notices */}
               <div className="lg:col-span-2 card">
                 <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
-                  <Calendar size={20} />
-                  This Week's Schedule
+                  <Bell size={20} />
+                  Latest Notices
                 </h3>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b">
-                        <th className="text-left py-2 px-2 font-semibold text-gray-700">Day</th>
-                        <th className="text-left py-2 px-2 font-semibold text-gray-700">Subject</th>
-                        <th className="text-left py-2 px-2 font-semibold text-gray-700">Room</th>
-                        <th className="text-left py-2 px-2 font-semibold text-gray-700">Teacher</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {schedule.length ? schedule.map((session, index) => (
-                        <tr key={index} className="border-b hover:bg-gray-50">
-                          <td className="py-2 px-2">{session.day}</td>
-                          <td className="py-2 px-2 font-semibold text-gray-900">{session.subject}</td>
-                          <td className="py-2 px-2">{session.startTime || 'TBD'} - {session.endTime || 'TBD'}</td>
-                          <td className="py-2 px-2 text-gray-600">{session.teacher}</td>
-                        </tr>
-                      )) : (
-                        <tr><td className="py-4 text-gray-500" colSpan="4">No class routine available.</td></tr>
-                      )}
-                    </tbody>
-                  </table>
+                <div className="space-y-3">
+                  {notices.length ? notices.slice(0, 6).map((notice) => (
+                    <div key={notice.id} className={`p-3 rounded-lg border ${notice.isUrgent ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-200'}`}>
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="font-semibold text-gray-900 truncate">{notice.title}</p>
+                          <p className="text-sm text-gray-700 mt-1 break-words">{notice.content}</p>
+                          <p className="text-xs text-gray-500 mt-2">{notice.date}</p>
+                        </div>
+                        {notice.isUrgent && <span className="badge badge-red text-xs">Urgent</span>}
+                      </div>
+                    </div>
+                  )) : <div className="text-sm text-gray-500">No notices yet.</div>}
                 </div>
               </div>
 
@@ -163,32 +152,11 @@ const StudentDashboard = () => {
                 <div className="space-y-3">
                   {pendingAssignments.length ? pendingAssignments.map((assignment, index) => (
                     <div key={index} className="p-3 bg-red-50 border-l-4 border-red-500 rounded">
-                      <p className="font-semibold text-gray-900">{assignment.name}</p>
+                      <p className="font-semibold text-gray-900">{assignment.title}</p>
                       <p className="text-sm text-gray-600 mt-1">{assignment.subject}</p>
-                      <p className="text-xs text-red-600 font-semibold mt-2">Due: {assignment.dueDate ? new Date(assignment.dueDate).toLocaleDateString() : 'TBD'}</p>
+                      <p className="text-xs text-red-600 font-semibold mt-2">Due: {assignment.dueDate || 'TBD'}</p>
                     </div>
                   )) : <div className="text-sm text-gray-500">No pending assignments.</div>}
-                </div>
-              </div>
-
-              {/* Upcoming Events */}
-              <div className="card">
-                <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
-                  <Calendar size={20} />
-                  Upcoming Events
-                </h3>
-                <div className="space-y-3">
-                  {upcomingEvents.length ? upcomingEvents.map((event, index) => (
-                    <div key={index} className="p-3 bg-blue-50 rounded-lg">
-                      <div className="flex justify-between items-start">
-                        <div>
-                          <p className="font-semibold text-gray-900">{event.name}</p>
-                          <p className="text-xs text-gray-600 mt-1">{event.date ? new Date(event.date).toLocaleDateString() : 'TBD'}</p>
-                        </div>
-                        <span className="badge badge-blue text-xs">{event.type}</span>
-                      </div>
-                    </div>
-                  )) : <div className="text-sm text-gray-500">No upcoming events.</div>}
                 </div>
               </div>
             </div>

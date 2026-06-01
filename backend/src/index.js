@@ -3,9 +3,15 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const mongoose = require('mongoose');
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
 const app = express();
+const uploadsDir = path.join(__dirname, '..', 'uploads');
+const assignmentUploadsDir = path.join(uploadsDir, 'assignments', 'submissions');
+
+fs.mkdirSync(assignmentUploadsDir, { recursive: true });
 
 // Middleware
 app.use(helmet());
@@ -13,6 +19,7 @@ app.use(cors());
 app.use(morgan('combined'));
 app.use(express.json());
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
+app.use('/uploads', express.static(uploadsDir));
 
 // MongoDB Connection
 const connectDB = async () => {
@@ -27,14 +34,27 @@ const connectDB = async () => {
       w: 'majority'
     };
 
+    // Optional TLS overrides for development (set in .env if needed)
+    if (process.env.MONGODB_TLS_ALLOW_INVALID === 'true') {
+      mongooseOptions.tls = true;
+      mongooseOptions.tlsAllowInvalidCertificates = true;
+      mongooseOptions.tlsAllowInvalidHostnames = true;
+      console.warn('WARNING: MongoDB TLS invalid certs allowed (MONGODB_TLS_ALLOW_INVALID=true)');
+    }
+
+    if (process.env.MONGODB_CA_FILE) {
+      mongooseOptions.tlsCAFile = process.env.MONGODB_CA_FILE;
+      console.log('Using custom CA file for MongoDB TLS from MONGODB_CA_FILE');
+    }
+
     await mongoose.connect(
       process.env.MONGODB_URI || 'mongodb://localhost:27017/edu-orbit',
       mongooseOptions
     );
     
-    console.log('✅ MongoDB connected successfully');
+    console.log(' MongoDB connected successfully');
   } catch (err) {
-    console.error('❌ MongoDB connection error:', err.message);
+    console.error(' MongoDB connection error:', err.message);
     console.error('Make sure:');
     console.error('  1. MongoDB Atlas cluster is accessible');
     console.error('  2. Your IP is whitelisted in MongoDB Atlas');

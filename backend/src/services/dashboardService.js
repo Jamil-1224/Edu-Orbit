@@ -183,7 +183,11 @@ const getTeacherDashboardData = async (userId) => {
     };
   }
 
-  const classIds = teacher.assignedClasses || [];
+  let classIds = teacher.assignedClasses || [];
+  if (!classIds.length) {
+    const teacherClasses = await Class.find({ classTeacherId: teacher._id }).select('_id').lean();
+    classIds = teacherClasses.map((item) => item._id);
+  }
   const [classes, studentsCount, assignments, attendance, marks] = await Promise.all([
     Class.find({ _id: { $in: classIds } })
       .populate('classTeacherId', 'name')
@@ -218,6 +222,16 @@ const getTeacherDashboardData = async (userId) => {
   const attendanceSummary = summarizeAttendance(attendance);
   const pendingAssignments = assignments.filter((assignment) => new Date(assignment.dueDate) >= new Date()).length;
 
+  // compute real student counts per class to avoid stale totals saved on class docs
+  const studentsPerClassAgg = await Student.aggregate([
+    { $match: { class: { $in: classIds } } },
+    { $group: { _id: '$class', count: { $sum: 1 } } }
+  ]);
+  const studentsCountMap = (studentsPerClassAgg || []).reduce((acc, item) => {
+    acc[String(item._id)] = item.count;
+    return acc;
+  }, {});
+
   return {
     profileReady: true,
     profile: {
@@ -235,7 +249,7 @@ const getTeacherDashboardData = async (userId) => {
       id: classDoc._id,
       name: classDoc.name,
       room: classDoc.room,
-      totalStudents: classDoc.totalStudents || 0,
+      totalStudents: studentsCountMap[String(classDoc._id)] || classDoc.totalStudents || 0,
       academicYear: classDoc.academicYear
     })),
     schedule: todaySchedule,
@@ -433,7 +447,7 @@ const getParentDashboardData = async (userId) => {
     if (child.pendingFees > 0) {
       childAlerts.push({
         title: 'Fee Reminder',
-        description: `₹${child.pendingFees.toLocaleString()} pending for ${child.name}`,
+        description: `৳${child.pendingFees.toLocaleString()} pending for ${child.name}`,
         severity: 'critical'
       });
     }

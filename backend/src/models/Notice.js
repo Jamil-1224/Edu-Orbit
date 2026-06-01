@@ -19,6 +19,10 @@ const noticeSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
   },
+  readBy: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  }],
   targetAudience: {
     type: [String],
     enum: ['admin', 'teacher', 'student', 'parent'],

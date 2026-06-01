@@ -3,7 +3,13 @@ import { BarChart3, TrendingUp, Award, Download } from 'lucide-react'
 import axios from 'axios'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api'
-const gradePoints = { 'A+': 4.0, A: 3.7, 'B+': 3.3, B: 3.0, 'C+': 2.7, C: 2.3, D: 1.7, F: 0.0 }
+const gradePoints = { 'A+': 4.0, A: 3.7, 'B+': 3.3, B: 3.0, 'C+': 2.7, C: 2.3, D: 1.7, E: 1.0, F: 0.0 }
+
+const normalizeExamType = (value) => String(value || '')
+  .trim()
+  .toLowerCase()
+  .replace(/[_\s]+/g, '-')
+  .replace(/-+/g, '-')
 
 const StudentResults = () => {
   const [examFilter, setExamFilter] = useState('all')
@@ -27,7 +33,9 @@ const StudentResults = () => {
   }, [])
 
   const filteredResults = useMemo(() => (
-    examFilter === 'all' ? results : results.filter((record) => record.exam?.toLowerCase() === examFilter.toLowerCase())
+    examFilter === 'all'
+      ? results
+      : results.filter((record) => normalizeExamType(record.exam) === normalizeExamType(examFilter))
   ), [results, examFilter])
 
   const gpa = useMemo(() => {

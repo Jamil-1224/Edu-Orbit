@@ -98,7 +98,7 @@ const formatDateTime = (value) => {
   return date.toLocaleString()
 }
 
-const formatCurrency = (value) => `₹${Number(value || 0).toLocaleString()}`
+const formatCurrency = (value) => `৳${Number(value || 0).toLocaleString()}`
 
 const joinValues = (value) => {
   if (Array.isArray(value)) return value.length ? value.join(', ') : '—'

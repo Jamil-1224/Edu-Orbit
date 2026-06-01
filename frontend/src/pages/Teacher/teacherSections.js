@@ -205,47 +205,63 @@ const buildTeacherSections = (lookups = {}) => {
         { label: 'Submissions', render: (record) => (record.submissions || []).length }
       ]
     },
-    routine: {
-      key: 'routine',
-      title: 'Routine',
-      description: 'Update routine entries for classes.',
-      endpoint: 'routine',
-      responseKey: 'routine',
-      canCreate: true,
-      supportsDelete: false,
-      createLabel: 'Update Routine',
-      initialForm: {
-        classId: '',
-        day: 'Monday',
-        periods: ''
-      },
-      toFormValues: (record) => ({
-        classId: record.classId || '',
-        day: record.day || 'Monday',
-        periods: record.periods ? JSON.stringify(record.periods, null, 2) : '[]'
-      }),
-      fields: [
-        { name: 'classId', label: 'Class', type: 'select', options: classOptions, required: true },
-        { name: 'day', label: 'Day', type: 'text', required: true },
-        { name: 'periods', label: 'Periods JSON', type: 'textarea', required: true, placeholder: '[{"periodNumber":1,"startTime":"09:00","endTime":"09:40","subject":"..."}]' }
-      ],
-      columns: [
-        { label: 'Class', render: (record) => record.className || (record.classId ? getClassLabel({ name: record.classId }) : '—') },
-        { label: 'Day', render: (record) => safeText(record.day) },
-        { label: 'Periods', render: (record) => (record.periods || []).length }
-      ]
-    },
+    
     notices: {
       key: 'notices',
       title: 'Notices',
-      description: 'See notices targeted to teachers or your classes.',
+      description: 'Create and manage notices for students or specific classes.',
       endpoint: 'notices',
       responseKey: 'notices',
-      canCreate: false,
+      canCreate: true,
+      createLabel: 'Create Notice',
+      initialForm: {
+        title: '',
+        content: '',
+        category: 'general',
+        targetAudience: ['student'],
+        targetClass: '',
+        attachments: '',
+        isUrgent: false,
+        expiryDate: ''
+      },
+      toFormValues: (record) => ({
+        title: record.title || '',
+        content: record.content || '',
+        category: record.category || 'general',
+        targetAudience: Array.isArray(record.targetAudience) ? record.targetAudience : ['student'],
+        targetClass: record.targetClass?._id || record.targetClass || '',
+        attachments: Array.isArray(record.attachments) ? record.attachments.join(', ') : '',
+        isUrgent: Boolean(record.isUrgent),
+        expiryDate: record.expiryDate ? String(record.expiryDate).slice(0, 10) : ''
+      }),
+      fields: [
+        { name: 'title', label: 'Title', type: 'text', required: true },
+        { name: 'content', label: 'Content', type: 'textarea', required: true },
+        { name: 'category', label: 'Category', type: 'select', options: [
+          { label: 'General', value: 'general' },
+          { label: 'Academic', value: 'academic' },
+          { label: 'Event', value: 'event' },
+          { label: 'Alert', value: 'alert' },
+          { label: 'Holiday', value: 'holiday' }
+        ] },
+        { name: 'targetAudience', label: 'Target Audience', type: 'checkbox-group', required: true, options: [
+          { label: 'Admin', value: 'admin' },
+          { label: 'Teacher', value: 'teacher' },
+          { label: 'Student', value: 'student' },
+          { label: 'Parent', value: 'parent' }
+        ] },
+        { name: 'attachments', label: 'Attachments', type: 'textarea', placeholder: 'Comma separated URLs' },
+        { name: 'isUrgent', label: 'Urgent', type: 'select', options: [
+          { label: 'No', value: false },
+          { label: 'Yes', value: true }
+        ] },
+        { name: 'expiryDate', label: 'Expiry Date', type: 'date' }
+      ],
       columns: [
         { label: 'Title', render: (record) => record.title || '—' },
         { label: 'Category', render: (record) => safeText(record.category) },
         { label: 'Audience', render: (record) => Array.isArray(record.targetAudience) ? record.targetAudience.join(', ') : '—' },
+        { label: 'Class', render: (record) => record.targetClass ? getClassLabel(record.targetClass) : 'All' },
         { label: 'Urgent', render: (record) => (record.isUrgent ? 'Yes' : 'No') },
         { label: 'Created', render: (record) => formatDateTime(record.createdAt) }
       ]
